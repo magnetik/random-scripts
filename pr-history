@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# Check if username is provided
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 <github_username>"
+  exit 1
+fi
+
+USERNAME=$1
+ORG="talkspirit"
+CURRENT_YEAR=$(date +%Y)
+START_DATE="$CURRENT_YEAR-01-01"
+
+get_week_start() {
+  date -d "$1 -$(date -d "$1" +%u) days + 1 day" +%Y-%m-%d
+}
+
+get_week_end() {
+  date -d "$(get_week_start $1) + 6 days" +%Y-%m-%d
+}
+
+format_date() {
+  date -d "$1" +"%b %d, %Y"
+}
+
+echo "# Merged Pull Requests for @$USERNAME in $CURRENT_YEAR across $ORG organization"
+echo
+
+REPOS=$(gh repo list $ORG --limit 1000 --json name --jq '.[].name')
+ALL_PRS="[]"
+
+for REPO in $REPOS; do
+  echo "Fetching PRs from $ORG/$REPO..." >&2
+  REPO_PRS=$(gh pr list --repo "$ORG/$REPO" --state merged --author "$USERNAME" --search "merged:>=$START_DATE" --limit 100 --json number,title,url,mergedAt)
+  
+  if [ "$REPO_PRS" != "[]" ] && [ -n "$REPO_PRS" ]; then
+    # Add repo information to each PR
+    REPO_PRS_WITH_REPO=$(echo "$REPO_PRS" | jq --arg repo "$REPO" '[.[] | . + {"repoName": $repo}]')
+    ALL_PRS=$(echo "$ALL_PRS" "$REPO_PRS_WITH_REPO" | jq -s '.[0] + .[1]')
+  fi
+done
+
+if [ "$ALL_PRS" == "[]" ]; then
+  echo "No merged PRs found for $USERNAME since $START_DATE in $ORG repositories"
+  exit 0
+fi
+
+SORTED_PRS=$(echo "$ALL_PRS" | jq 'sort_by(.mergedAt)')
+
+current_week=""
+echo "$SORTED_PRS" | jq -c '.[]' | while read -r PR; do
+  PR_NUMBER=$(echo "$PR" | jq -r '.number')
+  PR_TITLE=$(echo "$PR" | jq -r '.title')
+  PR_URL=$(echo "$PR" | jq -r '.url')
+  PR_MERGED_AT=$(echo "$PR" | jq -r '.mergedAt' | cut -d'T' -f1)
+  PR_REPO=$(echo "$PR" | jq -r '.repoName')
+  
+  week_start=$(get_week_start "$PR_MERGED_AT")
+  week_end=$(get_week_end "$PR_MERGED_AT")
+  week_display="Week of $(format_date "$week_start") to $(format_date "$week_end")"
+  
+  if [ "$week_display" != "$current_week" ]; then
+    echo "## $week_display"
+    echo
+    current_week="$week_display"
+  fi
+  
+  echo "- [$ORG/$PR_REPO#$PR_NUMBER]($PR_URL) - $PR_TITLE"
+done
+
+echo
+echo "_Report generated on $(date +"%Y-%m-%d %H:%M:%S")_"
+
