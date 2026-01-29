@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -e
+
+# Check if stdin is being piped
+if [ -t 0 ]; then
+  # No stdin data, use editor
+  # Create temporary file for commit message
+  temp_file=$(mktemp)
+
+  # Add template to the temporary file
+  cat << 'EOF' > "$temp_file"
+
+
+# Enter your conventional commit message in format 'type(scope): description'
+# Example: feat(hs): implement new feature
+#
+# The first line will be used for branch naming and commit message
+# Additional lines can be added for detailed description
+#
+# Lines starting with # are comments and will be ignored
+EOF
+
+  # Open editor (uses EDITOR environment variable, falls back to nano)
+  ${EDITOR:-nano} "$temp_file"
+
+  # Read the full commit message from the file, ignoring only comments
+  commit_msg_full=$(grep -v '^#' "$temp_file")
+
+  # Extract first line for validation and branch naming (ignoring empty lines)
+  commit_msg=$(echo "$commit_msg_full" | grep -v '^[[:space:]]*$' | head -1)
+
+  # Clean up temporary file
+  rm "$temp_file"
+else
+  # Read from stdin
+  commit_msg_full=$(cat)
+
+  # Extract first line for validation and branch naming (ignoring empty lines)
+  commit_msg=$(echo "$commit_msg_full" | grep -v '^[[:space:]]*$' | head -1)
+fi
+
+# Check if commit message is provided
+if [ -z "$commit_msg" ]; then
+  echo "Error: Commit message cannot be empty"
+  exit 1
+fi
+
+current_branch=$(git branch --show-current)
+if [ "$current_branch" != "master" ] && [ "$current_branch" != "main" ]; then
+    echo "Error: Not on default branch (master or main). Current branch: $current_branch"
+    exit 1
+fi
+
+# Regular expression to match conventional commit format
+regex="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9\/+]+\))?:[ ](.+)$"
+
+if [[ ! $commit_msg =~ $regex ]]; then
+  echo "Error: Commit message does not follow conventional commit format"
+  echo "Format: type(scope): description"
+  echo "Your message: $commit_msg"
+  exit 1
+fi
+
+# Extract components
+type=${BASH_REMATCH[1]}
+scope=$(echo ${BASH_REMATCH[2]} | sed 's/[()]//g')
+description=${BASH_REMATCH[3]}
+
+# Create branch name
+branch_prefix="$type"
+branch_description=$(echo "$scope-$description" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/-$//' | sed 's/^-//')
+
+# Trim branch description to reasonable length (50 characters max)
+branch_description=$(echo "$branch_description" | cut -c1-50 | sed 's/-$//')
+
+branch_name="$branch_prefix/$branch_description"
+
+# Save current changes if any
+echo "Checking if there are unstaged changes..."
+if ! git diff-index --quiet HEAD --; then
+  echo "Stashing current changes..."
+  git stash save "Temp stash before creating branch $branch_name"
+  stashed=true
+else
+  stashed=false
+fi
+
+# Create and checkout the branch
+echo "Creating and checking out branch: $branch_name"
+git checkout -b "$branch_name"
+
+# Apply stashed changes if any
+if [ "$stashed" = true ]; then
+  echo "Applying stashed changes..."
+  git stash pop
+fi
+
+# Add and commit all changes
+echo "Adding all changes and committing..."
+git add -A
+
+# Use the full message for the commit
+echo "$commit_msg_full" | git commit -n -F -
+
+echo "Branch '$branch_name' created with all changes committed."
+
+git push origin HEAD
+gh pr create --fill --draft
+
+echo "Created PR"
+
+exit 0
+
